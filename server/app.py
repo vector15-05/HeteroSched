@@ -73,26 +73,36 @@ _LATEST_RUN = {
 
 
 def _load_initial_results():
-    """Load existing workspace results.csv if present as a baseline previous run."""
+    """Load existing workspace results.csv or server/sample_results.csv as baseline data."""
     default_csv = os.path.join(WORKSPACE_ROOT, "results.csv")
+    sample_csv = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sample_results.csv")
+
+    target_csv = None
+    is_sample = False
     if os.path.exists(default_csv):
+        target_csv = default_csv
+    elif os.path.exists(sample_csv):
+        target_csv = sample_csv
+        is_sample = True
+
+    if target_csv:
         try:
-            tasks, summary = parse_benchmark_csv(default_csv)
-            mtime = os.path.getmtime(default_csv)
+            tasks, summary = parse_benchmark_csv(target_csv)
+            mtime = os.path.getmtime(target_csv)
             mtime_iso = datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
             _LATEST_RUN["is_fresh"] = False
-            _LATEST_RUN["source"] = "saved_results"
-            _LATEST_RUN["run_id"] = "saved_baseline"
+            _LATEST_RUN["source"] = "demo_sample" if is_sample else "saved_results"
+            _LATEST_RUN["run_id"] = "sample_baseline" if is_sample else "saved_baseline"
             _LATEST_RUN["trace_key"] = "mixed"
-            _LATEST_RUN["trace_name"] = "Mixed Workload (Saved Baseline)"
+            _LATEST_RUN["trace_name"] = "Mixed Workload (Demo / Sample Data - Not Live GPU Measurement)" if is_sample else "Mixed Workload (Saved Baseline)"
             _LATEST_RUN["timestamp_iso"] = mtime_iso
-            _LATEST_RUN["output_csv_path"] = default_csv
+            _LATEST_RUN["output_csv_path"] = target_csv
             _LATEST_RUN["summary"] = summary
             _LATEST_RUN["tasks"] = tasks
-            _LATEST_RUN["stdout"] = "Loaded from existing workspace results.csv"
-            print(f"Loaded existing results.csv ({len(tasks)} tasks). Marked as saved_results.")
+            _LATEST_RUN["stdout"] = "Demo / Sample benchmark data (offline local GPU measurement)" if is_sample else "Loaded from existing workspace results.csv"
+            print(f"Loaded {target_csv} ({len(tasks)} tasks). Marked as {_LATEST_RUN['source']}.")
         except Exception as e:
-            print(f"Could not load initial results.csv: {e}")
+            print(f"Could not load initial results: {e}")
 
 
 _load_initial_results()
@@ -100,9 +110,14 @@ _load_initial_results()
 
 @app.route("/api/system/info", methods=["GET"])
 def get_system_info():
-    """Returns detected GPU and system configuration specs."""
+    """Returns detected GPU and system configuration specs, differentiating local GPU from cloud demo."""
+    binary_available = os.path.exists(BINARY_PATH)
+    mode = "local_gpu" if binary_available else "cloud_demo"
     return jsonify({
         "status": "online",
+        "mode": mode,
+        "is_local_gpu": binary_available,
+        "execution_target": "NVIDIA GeForce RTX 4050 (Direct CUDA Kernel Dispatch)" if binary_available else "Cloud Serverless (Demo / Offline Baseline Only)",
         "gpu": {
             "name": "NVIDIA GeForce RTX 4050 Laptop GPU",
             "compute_capability": "8.9",
@@ -110,6 +125,7 @@ def get_system_info():
             "sm_count": 20,
             "memory_bus_width_bits": 96,
             "stream_priority_range": "[-5, 0]",
+            "hardware_present": binary_available,
         },
         "scheduler": {
             "engine": "HeteroSched Dual-Tier Engine",
@@ -123,6 +139,7 @@ def get_system_info():
         "host": {
             "platform": "Linux (Ubuntu 24.04 LTS under WSL2)",
             "architecture": "x86_64",
+            "mode": mode,
         },
     })
 
@@ -165,6 +182,12 @@ def run_benchmark():
 
     try:
         run_meta = execute_benchmark(trace_key, timeout_seconds=60.0)
+    except FileNotFoundError as e:
+        return jsonify({
+            "error": "Real benchmark execution requires the local C++/CUDA runtime and NVIDIA GPU hardware (heterosched_bench binary not found). Real GPU benchmarks cannot be run in the cloud serverless environment.",
+            "detail": str(e),
+            "cloud_environment": True,
+        }), 503
     except RuntimeError as e:
         msg = str(e)
         if "progress" in msg.lower():
@@ -225,6 +248,10 @@ def download_csv():
     csv_path = _LATEST_RUN.get("output_csv_path")
 
     if not csv_path or not os.path.exists(csv_path):
+        _load_initial_results()
+        csv_path = _LATEST_RUN.get("output_csv_path")
+
+    if not csv_path or not os.path.exists(csv_path):
         return jsonify({"error": "No benchmark results file available to download."}), 404
 
     run_id = _LATEST_RUN.get("run_id") or "heterosched_results"
@@ -269,5 +296,6 @@ def serve_frontend(path):
 
 
 if __name__ == "__main__":
-    print("Starting HeteroSched Backend API on http://127.0.0.1:5000 ...")
-    app.run(host="127.0.0.1", port=5000, debug=False)
+    port = int(os.environ.get("PORT", 5000))
+    print(f"Starting HeteroSched Backend API on http://127.0.0.1:{port} ...")
+    app.run(host="127.0.0.1", port=port, debug=False)
